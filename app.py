@@ -8,7 +8,7 @@ import re
 # --- UI Setup ---
 st.set_page_config(page_title="Retail Stock Tracker Tool", layout="centered")
 st.title("📦 Retail Stock Tracker Tool")
-st.write("Upload your raw inventory data, configure your filters, and download a multi-tab Excel report.")
+st.write("Upload your raw inventory data, configure your filters, and download a targeted multi-tab Excel report.")
 
 # 1. File Uploader
 uploaded_file = st.file_uploader("Upload your raw data (CSV or Excel)", type=['csv', 'xlsx', 'xls'])
@@ -30,20 +30,38 @@ if uploaded_file is not None:
     
     # Get all columns to populate the dropdown
     all_columns = df.columns.tolist()
-    
-    # Default to 'Brand Code' if it exists in the uploaded file
     default_index = all_columns.index('Brand Code') if 'Brand Code' in all_columns else 0
     
+    # Dropdown: What to split by
     split_col = st.selectbox(
-        "Which column would you like to filter and split the report tabs by?", 
+        "Which column would you like to split the report tabs by?", 
         all_columns, 
         index=default_index
     )
     
-    # NEW: Toggleable checkbox to remove generics and blanks
+    # Checkbox: Remove generics/blanks
     remove_generics = st.checkbox(
         f"Remove blank cells and 'Generic' values from the '{split_col}' column", 
         value=True
+    )
+
+    st.markdown("---")
+    st.subheader("Top Contributors Settings")
+    st.write("To keep the Excel file manageable, you can limit how many individual tabs are created.")
+
+    # Dropdown: Metric to rank by
+    ranking_metric = st.selectbox(
+        "Select the metric to rank the top contributors:",
+        ["Total_Stock_Value", "Live_SKUs_Count"]
+    )
+
+    # Number input: How many tabs to generate
+    top_n = st.number_input(
+        f"How many top {split_col} tabs do you want to generate?", 
+        min_value=1, 
+        max_value=200, 
+        value=10,
+        step=1
     )
 
     # 3. Process Data Button
@@ -51,13 +69,10 @@ if uploaded_file is not None:
         with st.spinner("Crunching the numbers and building your Excel file..."):
             
             # --- Data Processing Logic ---
-            
-            # Filter generics and blanks if the user kept the box checked
             if remove_generics:
                 df = df.dropna(subset=[split_col])
                 df = df[~df[split_col].astype(str).str.strip().str.lower().isin(['generic', ''])]
             else:
-                # If they want to keep blanks, we need to fill them with a string so Excel tab naming doesn't crash
                 df[split_col] = df[split_col].fillna("Unknown_Blank")
 
             # Select only the requested columns
@@ -69,11 +84,9 @@ if uploaded_file is not None:
                 'Ret Units L30d', 'Ret Units L60d', 'Ret Units Mtd', 'Age'
             ]
             
-            # Ensure the chosen split column is in our keep list
             if split_col not in cols_to_keep:
                 cols_to_keep.append(split_col)
 
-            # Check for missing columns and filter
             missing_cols = [col for col in cols_to_keep if col not in df.columns]
             if missing_cols:
                 st.warning(f"Note: The following expected columns are missing from the uploaded file: {', '.join(missing_cols)}")
@@ -104,7 +117,17 @@ if uploaded_file is not None:
                     Live_SKUs_Count=('Offer Price Lcy', 'count') 
                 ).reset_index()
             else:
-                pivot_df = pd.DataFrame() # Empty fallback if missing core columns
+                pivot_df = pd.DataFrame() 
+
+            # --- Extract Top N Contributors ---
+            if not pivot_df.empty:
+                # Sort the summary dataframe by the chosen metric in descending order
+                pivot_df = pivot_df.sort_values(by=ranking_metric, ascending=False)
+                # Grab exactly the top N names from the split column
+                top_categories = pivot_df[split_col].head(top_n).tolist()
+            else:
+                # Fallback if metrics are missing
+                top_categories = main_df[split_col].unique()[:top_n]
 
             # --- Excel Generation in Memory ---
             output = io.BytesIO()
@@ -117,16 +140,14 @@ if uploaded_file is not None:
                     summary_sheet_name = f'{split_col[:20]} Summary'
                     pivot_df.to_excel(writer, sheet_name=summary_sheet_name, index=False)
                 
-                # Write individual sheets for each unique value
-                unique_values = main_df[split_col].unique()
-                for value in unique_values:
+                # Write individual sheets ONLY for the top N categories
+                for value in top_categories:
                     value_df = main_df[main_df[split_col] == value]
                     
-                    # Create safe sheet names for Excel (Max 31 chars, no forbidden symbols)
+                    # Create safe sheet names for Excel
                     safe_sheet_name = re.sub(r'[\\/*?:\[\]]', '_', str(value))
                     safe_sheet_name = safe_sheet_name[:31] 
                     
-                    # Fallback if name becomes empty
                     if not safe_sheet_name.strip():
                         safe_sheet_name = "Data_Sheet"
                         
@@ -135,9 +156,9 @@ if uploaded_file is not None:
             # Prepare for download
             output.seek(0)
             today_date = datetime.now().strftime("%d-%m-%y")
-            file_name = f'Retail Stock Tracker - {today_date}.xlsx'
+            file_name = f'Retail Stock Tracker - Top {top_n} - {today_date}.xlsx'
 
-            st.success("Report generated successfully!")
+            st.success(f"Report generated successfully! Configured for the Top {top_n} tabs.")
             
             # 4. Download Button
             st.download_button(
